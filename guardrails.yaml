@@ -1,0 +1,17 @@
+pipeline:
+  input_guardrails:
+    - type: max_length
+      maximum: 100
+    - type: blocked_words
+      words: ["password", "secret", "api_key"]
+    - type: pii
+      entities: ["email", "phone", "ssn", "credit_card", "api_key"]
+      action: block
+    - type: toxicity
+      threshold: 0.5
+  output_guardrails:
+    - type: blocked_words
+      words: ["secret", "password", "internal"]
+    - type: pii
+      entities: ["email", "phone", "ssn"]
+      action: block

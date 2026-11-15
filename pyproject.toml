@@ -1,0 +1,42 @@
+[project]
+name = "ai-guardrails-sdk"
+version = "0.1.0"
+description = "Unified Guardrails SDK for LLM Applications - One SDK for all guardrails"
+readme = "README.md"
+authors = [
+    { email = "jagadeeshuttaravill117@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.14.3",
+    "pyyaml>=6.0.3",
+]
+
+[project.optional-dependencies]
+otel = ["opentelemetry-api>=1.20.0", "opentelemetry-sdk>=1.20.0", "opentelemetry-exporter-console>=1.20.0"]
+cloud = ["boto3>=1.34.0", "azure-ai-contentsafety>=1.0.0"]
+local-ml = ["torch>=2.0.0", "transformers>=4.35.0", "presidio-analyzer>=2.2.0"]
+all = ["ai-guardrails-sdk[otel]", "ai-guardrails-sdk[cloud]", "ai-guardrails-sdk[local-ml]"]
+
+[project.scripts]
+ai-guardrails-sdk = "ai_guardrails_sdk.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.13.7,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "ruff>=0.17.5",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.1.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM", "T20"]
+ignore = ["S101", "T201"]
