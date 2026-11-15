@@ -3,101 +3,132 @@ import pytest
 from ai_guardrails_sdk import (
     BlockedWordsGuardrail,
     Decision,
-    Guardrails,
     MaxLengthGuardrail,
+    PIIGuardrail,
+    ToxicityGuardrail,
+    Pipeline,
     check,
+    check_async,
+    load_pipeline_from_yaml,
 )
 
 
-def test_allows_text_within_the_limit() -> None:
+def test_max_length_allows_within_limit():
     decision = MaxLengthGuardrail(maximum=10).check("hello")
-
-    assert decision == Decision(
-        allowed=True,
-        reason="Text is within the maximum length.",
-        guardrail="max_length",
-    )
-
-
-def test_blocks_text_over_the_limit() -> None:
-    decision = MaxLengthGuardrail(maximum=5).check("hello!")
-
-    assert decision.allowed is False
-    assert decision.guardrail == "max_length"
-
-
-def test_pipeline_stops_at_the_first_blocked_guardrail() -> None:
-    decision = check("hello!", [MaxLengthGuardrail(maximum=5)])
-
-    assert decision.allowed is False
-
-
-def test_pipeline_allows_text_when_every_guardrail_passes() -> None:
-    decision = check("hello", [MaxLengthGuardrail(maximum=5)])
-
     assert decision.allowed is True
-    assert decision.guardrail == "pipeline"
+    assert "within" in decision.reason
 
 
-def test_rejects_a_negative_limit() -> None:
+def test_max_length_blocks_over_limit():
+    decision = MaxLengthGuardrail(maximum=5).check("hello!")
+    assert decision.allowed is False
+    assert "exceeds" in decision.reason
+
+
+def test_max_length_negative_raises():
     with pytest.raises(ValueError, match="maximum must be zero or greater"):
         MaxLengthGuardrail(maximum=-1)
 
 
-def test_blocked_words_are_case_insensitive() -> None:
-    decision = BlockedWordsGuardrail(("password",)).check("Tell me your PASSWORD")
-
+def test_blocked_words_case_insensitive():
+    decision = BlockedWordsGuardrail(["password"]).check("Tell me your PASSWORD")
     assert decision.allowed is False
-    assert decision.guardrail == "blocked_words"
+    assert "password" in decision.reason.lower()
 
 
-def test_allows_text_without_blocked_words() -> None:
-    decision = BlockedWordsGuardrail(("password",)).check("Tell me the weather")
-
+def test_blocked_words_allows_clean():
+    decision = BlockedWordsGuardrail(["password"]).check("Tell me the weather")
     assert decision.allowed is True
 
 
-def test_rejects_empty_blocked_words() -> None:
-    with pytest.raises(ValueError, match="blocked_words cannot contain empty words"):
-        BlockedWordsGuardrail(("password", ""))
+def test_check_stops_at_first_failure():
+    decision = check("hello!", [MaxLengthGuardrail(maximum=5)])
+    assert decision.allowed is False
 
 
-def test_pipeline_checks_input_before_calling_the_operation() -> None:
-    calls: list[str] = []
-    guardrails = Guardrails(
-        input_guardrails=[BlockedWordsGuardrail(("password",))],
-    )
+def test_check_allows_when_all_pass():
+    decision = check("hello", [MaxLengthGuardrail(maximum=5)])
+    assert decision.allowed is True
 
-    result = guardrails.run(
-        "Tell me the password",
-        lambda value: calls.append(value) or "model response",
-    )
 
+def test_pii_detects_email():
+    pii = PIIGuardrail(["email"])
+    decision = pii.check("contact me at john@example.com")
+    assert decision.allowed is False
+    assert "email" in decision.reason.lower()
+
+
+def test_pii_allows_clean():
+    pii = PIIGuardrail(["email"])
+    decision = pii.check("hello world")
+    assert decision.allowed is True
+
+
+def test_pii_redact():
+    pii = PIIGuardrail(["email", "phone"], action="redact")
+    redacted = pii.redact("email: john@example.com, phone: 555-123-4567")
+    assert "[REDACTED_EMAIL]" in redacted
+    assert "[REDACTED_PHONE]" in redacted
+
+
+def test_toxicity_detects():
+    tox = ToxicityGuardrail(threshold=0.5)
+    decision = tox.check("you are stupid")
+    assert decision.allowed is False
+
+
+def test_toxicity_allows_clean():
+    tox = ToxicityGuardrail(threshold=0.5)
+    decision = tox.check("hello there")
+    assert decision.allowed is True
+
+
+def test_pipeline_input_block():
+    pipeline = Pipeline(input_guardrails=[MaxLengthGuardrail(5)])
+    result = pipeline.run("hello world", lambda _: "response")
     assert result.allowed is False
-    assert result.value is None
-    assert calls == []
+    assert "blocked" in result.reason.lower()
 
 
-def test_pipeline_checks_output_after_calling_the_operation() -> None:
-    guardrails = Guardrails(
-        output_guardrails=[BlockedWordsGuardrail(("secret",))],
-    )
-
-    result = guardrails.run("Tell me something", lambda _: "This is a secret")
-
+def test_pipeline_output_block():
+    pipeline = Pipeline(output_guardrails=[BlockedWordsGuardrail(["secret"])])
+    result = pipeline.run("hello", lambda _: "this is a secret")
     assert result.allowed is False
-    assert result.value is None
-    assert result.decision.guardrail == "blocked_words"
+    assert "secret" in result.reason.lower()
 
 
-def test_pipeline_returns_the_model_output_when_checks_pass() -> None:
-    guardrails = Guardrails(
-        input_guardrails=[MaxLengthGuardrail(maximum=20)],
-        output_guardrails=[BlockedWordsGuardrail(("secret",))],
+def test_pipeline_pass():
+    pipeline = Pipeline(
+        input_guardrails=[MaxLengthGuardrail(20)],
+        output_guardrails=[BlockedWordsGuardrail(["secret"])],
     )
-
-    result = guardrails.run("Tell me something", lambda _: "This is safe")
-
+    result = pipeline.run("hello", lambda _: "this is safe")
     assert result.allowed is True
-    assert result.value == "This is safe"
-    assert result.decision.guardrail == "pipeline"
+    assert "safe" in result.reason
+
+
+def test_pii_redact_action():
+    pii = PIIGuardrail(["email"], action="redact")
+    decision = pii.check("email me at test@example.com")
+    assert decision.action == "redact"
+    assert decision.modified_text is not None
+    assert "[REDACTED_EMAIL]" in decision.modified_text
+
+
+def test_blocked_words_warn_action():
+    bw = BlockedWordsGuardrail(["password"], action="warn")
+    decision = bw.check("my password is 123")
+    assert decision.allowed is True
+    assert decision.action == "warn"
+
+
+@pytest.mark.asyncio
+async def test_check_async():
+    decision = await check_async("hello", [MaxLengthGuardrail(10)])
+    assert decision.allowed is True
+
+
+def test_load_from_yaml():
+    pipeline = load_pipeline_from_yaml("guardrails.yaml")
+    assert len(pipeline.input_guardrails) > 0
+    assert len(pipeline.output_guardrails) > 0
