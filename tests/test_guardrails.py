@@ -3,9 +3,13 @@ import pytest
 from ai_guardrails_sdk import (
     BlockedWordsGuardrail,
     Decision,
+    HITLGuardrail,
+    LoopCounterGuardrail,
     MaxLengthGuardrail,
     PIIGuardrail,
     PromptInjectionGuardrail,
+    ToolAllowlistGuardrail,
+    ToolSchemaGuardrail,
     TopicGuardrail,
     ToxicityGuardrail,
     Pipeline,
@@ -160,3 +164,67 @@ def test_topic_denied():
 def test_topic_allows_clean():
     topic = TopicGuardrail(denied_topics=["violence"])
     assert topic.check("help me write python").allowed is True
+
+
+import json
+
+
+def test_tool_allowlist_allows():
+    guard = ToolAllowlistGuardrail(allowed_tools=["search", "calc"])
+    assert guard.check(json.dumps({"name": "search"})).allowed is True
+
+
+def test_tool_allowlist_denied():
+    guard = ToolAllowlistGuardrail(denied_tools=["shell", "exec"])
+    assert guard.check(json.dumps({"name": "shell"})).allowed is False
+
+
+def test_tool_allowlist_not_in_list():
+    guard = ToolAllowlistGuardrail(allowed_tools=["search"])
+    assert guard.check(json.dumps({"name": "database"})).allowed is False
+
+
+def test_tool_schema_valid():
+    guard = ToolSchemaGuardrail({"search": {"required": ["q"], "properties": {"q": {"type": "string"}}}})
+    assert guard.check(json.dumps({"name": "search", "arguments": {"q": "test"}})).allowed is True
+
+
+def test_tool_schema_missing_required():
+    guard = ToolSchemaGuardrail({"search": {"required": ["q"]}})
+    assert guard.check(json.dumps({"name": "search", "arguments": {}})).allowed is False
+
+
+def test_tool_schema_type_mismatch():
+    guard = ToolSchemaGuardrail({"search": {"properties": {"limit": {"type": "integer"}}}})
+    assert guard.check(json.dumps({"name": "search", "arguments": {"limit": "five"}})).allowed is False
+
+
+def test_hitl_approval():
+    hitl = HITLGuardrail(required_for=["send_email"], approval_callback=lambda t, a: True)
+    assert hitl.check(json.dumps({"name": "send_email"})).allowed is True
+
+
+def test_hitl_no_approval_needed():
+    hitl = HITLGuardrail(required_for=["send_email"])
+    assert hitl.check(json.dumps({"name": "search"})).allowed is True
+
+
+def test_loop_counter_steps():
+    loop = LoopCounterGuardrail(max_steps=2)
+    assert loop.check("step 1").allowed is True
+    assert loop.check("step 2").allowed is True
+    assert loop.check("step 3").allowed is False
+
+
+def test_loop_counter_tool_calls():
+    loop = LoopCounterGuardrail(max_tool_calls=1)
+    assert loop.check(json.dumps({"name": "search"})).allowed is True
+    assert loop.check(json.dumps({"name": "search"})).allowed is False
+
+
+def test_loop_counter_reset():
+    loop = LoopCounterGuardrail(max_steps=1)
+    loop.check("step 1")
+    assert loop.check("step 2").allowed is False
+    loop.reset()
+    assert loop.check("step 1").allowed is True

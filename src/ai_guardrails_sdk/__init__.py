@@ -176,6 +176,121 @@ class ToxicityGuardrail(BaseGuardrail):
         return self._make_decision(True, "No toxicity detected")
 
 
+class ToolAllowlistGuardrail(BaseGuardrail):
+    def __init__(
+        self,
+        allowed_tools: list[str] = None,
+        denied_tools: list[str] = None,
+        action: str = "block",
+    ):
+        super().__init__(action)
+        self.allowed_tools = set(allowed_tools or [])
+        self.denied_tools = set(denied_tools or [])
+
+    def check(self, text: str) -> Decision:
+        import json
+        try:
+            data = json.loads(text)
+            tool_name = data.get("name") or data.get("tool")
+            if tool_name:
+                if self.denied_tools and tool_name in self.denied_tools:
+                    return self._make_decision(False, f"Denied tool: {tool_name}")
+                if self.allowed_tools and tool_name not in self.allowed_tools:
+                    return self._make_decision(False, f"Tool not in allowlist: {tool_name}")
+        except json.JSONDecodeError:
+            pass
+        return self._make_decision(True, "Tool allowlist check passed")
+
+
+class ToolSchemaGuardrail(BaseGuardrail):
+    def __init__(self, schemas: dict[str, dict] = None, action: str = "block"):
+        super().__init__(action)
+        self.schemas = schemas or {}
+
+    def check(self, text: str) -> Decision:
+        import json
+        try:
+            data = json.loads(text)
+            tool_name = data.get("name") or data.get("tool")
+            arguments = data.get("arguments") or data.get("args") or {}
+            if tool_name and tool_name in self.schemas:
+                schema = self.schemas[tool_name]
+                required = schema.get("required", [])
+                properties = schema.get("properties", {})
+                for req in required:
+                    if req not in arguments:
+                        return self._make_decision(False, f"Missing required arg: {req}")
+                for key, value in arguments.items():
+                    if key in properties:
+                        expected_type = properties[key].get("type")
+                        if expected_type and not self._check_type(value, expected_type):
+                            return self._make_decision(False, f"Type mismatch for {key}: expected {expected_type}")
+        except json.JSONDecodeError:
+            pass
+        return self._make_decision(True, "Tool schema validation passed")
+
+    def _check_type(self, value, expected_type: str) -> bool:
+        type_map = {"string": str, "number": (int, float), "integer": int, "boolean": bool, "array": list, "object": dict}
+        expected = type_map.get(expected_type)
+        return expected is None or isinstance(value, expected)
+
+
+class HITLGuardrail(BaseGuardrail):
+    def __init__(
+        self,
+        required_for: list[str] = None,
+        approvers: list[str] = None,
+        approval_callback=None,
+        action: str = "require_approval",
+    ):
+        super().__init__(action)
+        self.required_for = set(required_for or [])
+        self.approvers = set(approvers or [])
+        self.approval_callback = approval_callback
+
+    def check(self, text: str) -> Decision:
+        import json
+        try:
+            data = json.loads(text)
+            tool_name = data.get("name") or data.get("tool")
+            if tool_name and tool_name in self.required_for:
+                if self.approval_callback:
+                    approved = self.approval_callback(tool_name, data.get("arguments", {}))
+                    if not approved:
+                        return self._make_decision(False, f"HITL approval required for: {tool_name}")
+        except json.JSONDecodeError:
+            pass
+        return self._make_decision(True, "HITL check passed")
+
+
+class LoopCounterGuardrail(BaseGuardrail):
+    def __init__(self, max_steps: int = 10, max_tool_calls: int = 20, action: str = "block"):
+        super().__init__(action)
+        self.max_steps = max_steps
+        self.max_tool_calls = max_tool_calls
+        self.step_count = 0
+        self.tool_call_count = 0
+
+    def check(self, text: str) -> Decision:
+        import json
+        try:
+            data = json.loads(text)
+            if "tool" in data or "name" in data:
+                self.tool_call_count += 1
+                if self.tool_call_count > self.max_tool_calls:
+                    return self._make_decision(False, f"Max tool calls exceeded: {self.max_tool_calls}")
+        except json.JSONDecodeError:
+            pass
+        self.step_count += 1
+        if self.step_count > self.max_steps:
+            return self._make_decision(False, f"Max steps exceeded: {self.max_steps}")
+        return self._make_decision(True, "Loop counter check passed")
+
+    def reset(self):
+        self.step_count = 0
+        self.tool_call_count = 0
+
+
 async def check_async(text: str, guardrails: list[BaseGuardrail]) -> Decision:
     current_text = text
     for g in guardrails:
@@ -247,6 +362,10 @@ GUARDRAIL_REGISTRY = {
     "toxicity": ToxicityGuardrail,
     "prompt_injection": PromptInjectionGuardrail,
     "topic": TopicGuardrail,
+    "tool_allowlist": ToolAllowlistGuardrail,
+    "tool_schema": ToolSchemaGuardrail,
+    "hitl": HITLGuardrail,
+    "loop_counter": LoopCounterGuardrail,
 }
 
 
