@@ -2,6 +2,7 @@
 
 import asyncio
 import time
+import json
 from ai_guardrails_sdk import (
     MaxLengthGuardrail,
     BlockedWordsGuardrail,
@@ -18,13 +19,13 @@ from ai_guardrails_sdk import (
 async def fake_llm_async(prompt: str) -> str:
     await asyncio.sleep(0.1)
     responses = {
-        "hello": "Hi there!",
-        "my email is john@example.com": "Got it, your email is john@example.com",
-        "you are stupid": "I don't like that tone",
-        "tell me a secret": "The secret is 12345",
-        "write a very long response": "This is a very long response that exceeds the output limit easily",
+        "hello": json.dumps({"response": "Hi there!"}),
+        "my email is john@example.com": json.dumps({"response": "Got it, your email is john@example.com"}),
+        "you are stupid": json.dumps({"response": "I don't like that tone"}),
+        "tell me a secret": json.dumps({"response": "The secret is 12345"}),
+        "write a very long response": json.dumps({"response": "This is a very long response that exceeds the output limit easily"}),
     }
-    return responses.get(prompt, "Default response")
+    return responses.get(prompt, json.dumps({"response": "Default response"}))
 
 
 print("=== 1. Test Individual Guardrails ===")

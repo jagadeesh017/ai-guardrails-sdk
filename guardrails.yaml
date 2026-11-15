@@ -1,56 +1,119 @@
-pipeline:
-  input_guardrails:
-    - type: max_length
+version: "1.0"
+name: "default"
+fail_mode: "fail_open"
+global_timeout_ms: 30000
+
+input:
+  enabled: true
+  mode: "sequential"
+  fail_mode: "fail_open"
+  timeout_ms: 10000
+  rules:
+    - type: "max_length"
       maximum: 100
-    - type: blocked_words
+    - type: "blocked_words"
       words: ["password", "secret", "api_key"]
-      action: block
-    - type: pii
+      action: "block"
+    - type: "pii"
       entities: ["email", "phone", "ssn", "credit_card", "api_key"]
-      action: block
-    - type: toxicity
+      action: "block"
+    - type: "toxicity"
       threshold: 0.5
-      action: block
-    - type: prompt_injection
-      action: block
-    - type: topic
+      action: "block"
+    - type: "prompt_injection"
+      action: "block"
+    - type: "topic"
       denied_topics: ["violence", "illegal", "self_harm", "hate_speech"]
-      action: block
-    - type: rate_limiter
+      action: "block"
+    - type: "rate_limiter"
       requests_per_minute: 60
       requests_per_hour: 1000
-      action: throttle
-    - type: budget
+      action: "throttle"
+    - type: "budget"
       daily_token_limit: 100000
       daily_cost_limit_usd: 50.0
       cost_per_1k_tokens: 0.01
-      action: block
-  output_guardrails:
-    - type: blocked_words
+      action: "block"
+
+rag:
+  enabled: true
+  mode: "sequential"
+  rules:
+    - type: "rbac"
+      required_roles: ["user"]
+    - type: "indirect_injection"
+      action: "block"
+    - type: "token_truncation"
+      max_tokens: 4000
+
+agent:
+  enabled: true
+  mode: "sequential"
+  rules:
+    - type: "tool_allowlist"
+      allowed_tools: ["search", "calculator", "code_executor"]
+      denied_tools: ["shell", "exec", "rm"]
+    - type: "tool_schema"
+      schemas:
+        search:
+          required: ["query"]
+          properties:
+            query: {type: "string"}
+            limit: {type: "integer"}
+    - type: "hitl"
+      required_for: ["send_email", "delete_data"]
+      approval_callback: null
+    - type: "loop_counter"
+      max_steps: 10
+      max_tool_calls: 20
+
+output:
+  enabled: true
+  mode: "sequential"
+  rules:
+    - type: "blocked_words"
       words: ["secret", "password", "internal"]
-      action: block
-    - type: pii
+      action: "block"
+    - type: "pii"
       entities: ["email", "phone", "ssn"]
-      action: block
-    - type: json_schema
+      action: "block"
+    - type: "json_schema"
       schema:
         required: ["response"]
         properties:
           response: {type: "string"}
-      action: retry
+      action: "retry"
       max_retries: 3
-    - type: hallucination
+    - type: "hallucination"
       context: "The capital of France is Paris. It is known for the Eiffel Tower."
       threshold: 0.5
-      action: warn
-    - type: pii_leak
+      action: "warn"
+    - type: "pii_leak"
       entities: ["email", "phone", "ssn"]
-      action: redact
-    - type: brand_filter
+      action: "redact"
+    - type: "brand_filter"
       blocked_terms: ["competitor", "internal_codename"]
       replacement: "[BRAND]"
-      action: redact
-    - type: audit_logger
-      log_level: info
+      action: "redact"
+    - type: "audit_logger"
+      log_level: "info"
       include_payloads: false
-      action: log
+      action: "log"
+
+ops:
+  enabled: true
+  mode: "parallel"
+  rules:
+    - type: "rate_limiter"
+      requests_per_minute: 60
+      requests_per_hour: 1000
+      action: "throttle"
+    - type: "budget"
+      daily_token_limit: 100000
+      daily_cost_limit_usd: 50.0
+      cost_per_1k_tokens: 0.01
+      action: "block"
+    - type: "audit_logger"
+      log_level: "info"
+      include_payloads: false
+      action: "log"
