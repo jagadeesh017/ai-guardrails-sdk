@@ -1,8 +1,10 @@
 import pytest
 
 from ai_guardrails_sdk import (
+    AuditLoggerGuardrail,
     BlockedWordsGuardrail,
     BrandFilterGuardrail,
+    BudgetGuardrail,
     Decision,
     HallucinationGuardrail,
     HITLGuardrail,
@@ -12,6 +14,7 @@ from ai_guardrails_sdk import (
     PIIGuardrail,
     PIILeakGuardrail,
     PromptInjectionGuardrail,
+    RateLimiterGuardrail,
     ToolAllowlistGuardrail,
     ToolSchemaGuardrail,
     TopicGuardrail,
@@ -276,3 +279,51 @@ def test_brand_filter_redact():
     assert decision.allowed is False
     assert decision.action == "redact"
     assert "[BRAND]" in decision.modified_text
+
+
+import json
+
+
+def test_rate_limiter_allows():
+    guard = RateLimiterGuardrail(requests_per_minute=3)
+    req = json.dumps({"user_id": "user1"})
+    assert guard.check(req).allowed is True
+    assert guard.check(req).allowed is True
+    assert guard.check(req).allowed is True
+
+
+def test_rate_limiter_blocks():
+    guard = RateLimiterGuardrail(requests_per_minute=2)
+    req = json.dumps({"user_id": "user1"})
+    guard.check(req)
+    guard.check(req)
+    assert guard.check(req).allowed is False
+
+
+def test_budget_allows():
+    guard = BudgetGuardrail(daily_token_limit=1000, daily_cost_limit_usd=0.01)
+    req = json.dumps({"tokens": 300})
+    assert guard.check(req).allowed is True
+    assert guard.check(req).allowed is True
+
+
+def test_budget_blocks_tokens():
+    guard = BudgetGuardrail(daily_token_limit=500)
+    req = json.dumps({"tokens": 300})
+    guard.check(req)
+    assert guard.check(req).allowed is False
+
+
+def test_budget_blocks_cost():
+    guard = BudgetGuardrail(daily_cost_limit_usd=0.005, cost_per_1k_tokens=0.01)
+    req = json.dumps({"tokens": 600})
+    guard.check(req)
+    assert guard.check(req).allowed is False
+
+
+def test_audit_logger_logs():
+    guard = AuditLoggerGuardrail(log_level="debug", include_payloads=True)
+    req = json.dumps({"user_id": "user1", "trace_id": "abc"})
+    assert guard.check(req).allowed is True
+    assert len(guard.logs) == 1
+    assert guard.logs[0]["user_id"] == "user1"

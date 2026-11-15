@@ -419,6 +419,144 @@ class BrandFilterGuardrail(BaseGuardrail):
         return result
 
 
+import time
+from collections import defaultdict
+
+
+class RateLimiterGuardrail(BaseGuardrail):
+    def __init__(
+        self,
+        requests_per_minute: int = 60,
+        requests_per_hour: int = 1000,
+        action: str = "throttle",
+    ):
+        super().__init__(action)
+        self.rpm = requests_per_minute
+        self.rph = requests_per_hour
+        self.minute_counts = defaultdict(list)
+        self.hour_counts = defaultdict(list)
+
+    def check(self, text: str) -> Decision:
+        import json
+        try:
+            data = json.loads(text)
+            user_id = data.get("user_id", "anonymous")
+        except json.JSONDecodeError:
+            user_id = "anonymous"
+
+        now = time.time()
+        self._cleanup_old(now)
+
+        minute_count = len(self.minute_counts[user_id])
+        hour_count = len(self.hour_counts[user_id])
+
+        if minute_count >= self.rpm:
+            return self._make_decision(False, f"Rate limit exceeded: {self.rpm} req/min")
+        if hour_count >= self.rph:
+            return self._make_decision(False, f"Rate limit exceeded: {self.rph} req/hour")
+
+        self.minute_counts[user_id].append(now)
+        self.hour_counts[user_id].append(now)
+        return self._make_decision(True, f"Rate limit OK ({minute_count}/{self.rpm} min, {hour_count}/{self.rph} hour)")
+
+    def _cleanup_old(self, now: float):
+        for uid in list(self.minute_counts.keys()):
+            self.minute_counts[uid] = [t for t in self.minute_counts[uid] if now - t < 60]
+            if not self.minute_counts[uid]:
+                del self.minute_counts[uid]
+        for uid in list(self.hour_counts.keys()):
+            self.hour_counts[uid] = [t for t in self.hour_counts[uid] if now - t < 3600]
+            if not self.hour_counts[uid]:
+                del self.hour_counts[uid]
+
+
+class BudgetGuardrail(BaseGuardrail):
+    def __init__(
+        self,
+        daily_token_limit: int = 100000,
+        daily_cost_limit_usd: float = 50.0,
+        cost_per_1k_tokens: float = 0.01,
+        action: str = "block",
+    ):
+        super().__init__(action)
+        self.daily_token_limit = daily_token_limit
+        self.daily_cost_limit_usd = daily_cost_limit_usd
+        self.cost_per_1k_tokens = cost_per_1k_tokens
+        self.tokens_used = 0
+        self.cost_used = 0.0
+        self.last_reset = time.time()
+
+    def check(self, text: str) -> Decision:
+        import json
+        try:
+            data = json.loads(text)
+            tokens = data.get("tokens", len(text) // 4)
+            cost = (tokens / 1000) * self.cost_per_1k_tokens
+        except json.JSONDecodeError:
+            tokens = len(text) // 4
+            cost = (tokens / 1000) * self.cost_per_1k_tokens
+
+        self._maybe_reset()
+
+        if self.tokens_used + tokens > self.daily_token_limit:
+            return self._make_decision(False, f"Daily token budget exceeded: {self.tokens_used + tokens}/{self.daily_token_limit}")
+        if self.cost_used + cost > self.daily_cost_limit_usd:
+            return self._make_decision(False, f"Daily cost budget exceeded: ${self.cost_used + cost:.2f}/${self.daily_cost_limit_usd}")
+
+        self.tokens_used += tokens
+        self.cost_used += cost
+        return self._make_decision(True, f"Budget OK (tokens: {self.tokens_used}/{self.daily_token_limit}, cost: ${self.cost_used:.2f}/${self.daily_cost_limit_usd})")
+
+    def _maybe_reset(self):
+        if time.time() - self.last_reset > 86400:
+            self.tokens_used = 0
+            self.cost_used = 0.0
+            self.last_reset = time.time()
+
+    def reset(self):
+        self.tokens_used = 0
+        self.cost_used = 0.0
+        self.last_reset = time.time()
+
+
+class AuditLoggerGuardrail(BaseGuardrail):
+    def __init__(self, log_level: str = "info", include_payloads: bool = False, action: str = "log"):
+        super().__init__(action)
+        self.log_level = log_level
+        self.include_payloads = include_payloads
+        self.logs = []
+
+    def check(self, text: str) -> Decision:
+        import json
+        try:
+            data = json.loads(text)
+            user_id = data.get("user_id", "anonymous")
+            trace_id = data.get("trace_id", "unknown")
+        except json.JSONDecodeError:
+            user_id = "anonymous"
+            trace_id = "unknown"
+
+        log_entry = {
+            "timestamp": time.time(),
+            "user_id": user_id,
+            "trace_id": trace_id,
+            "action": "guardrail_check",
+        }
+        if self.include_payloads:
+            log_entry["payload"] = text
+
+        self.logs.append(log_entry)
+
+        import logging
+        logger = logging.getLogger("ai_guardrails")
+        if self.log_level == "info":
+            logger.info(f"Audit: user={user_id} trace={trace_id}")
+        elif self.log_level == "debug":
+            logger.debug(f"Audit: {log_entry}")
+
+        return self._make_decision(True, "Audit logged")
+
+
 async def check_async(text: str, guardrails: list[BaseGuardrail]) -> Decision:
     current_text = text
     for g in guardrails:
@@ -498,6 +636,9 @@ GUARDRAIL_REGISTRY = {
     "hallucination": HallucinationGuardrail,
     "pii_leak": PIILeakGuardrail,
     "brand_filter": BrandFilterGuardrail,
+    "rate_limiter": RateLimiterGuardrail,
+    "budget": BudgetGuardrail,
+    "audit_logger": AuditLoggerGuardrail,
 }
 
 

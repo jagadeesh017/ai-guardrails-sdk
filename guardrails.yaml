@@ -16,6 +16,15 @@ pipeline:
     - type: topic
       denied_topics: ["violence", "illegal", "self_harm", "hate_speech"]
       action: block
+    - type: rate_limiter
+      requests_per_minute: 60
+      requests_per_hour: 1000
+      action: throttle
+    - type: budget
+      daily_token_limit: 100000
+      daily_cost_limit_usd: 50.0
+      cost_per_1k_tokens: 0.01
+      action: block
   output_guardrails:
     - type: blocked_words
       words: ["secret", "password", "internal"]
@@ -41,3 +50,7 @@ pipeline:
       blocked_terms: ["competitor", "internal_codename"]
       replacement: "[BRAND]"
       action: redact
+    - type: audit_logger
+      log_level: info
+      include_payloads: false
+      action: log
