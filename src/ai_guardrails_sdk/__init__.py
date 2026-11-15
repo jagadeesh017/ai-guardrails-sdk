@@ -1,6 +1,8 @@
 import asyncio
 import re
-from typing import Callable, Awaitable
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Callable, Awaitable, Any
 import yaml
 
 
@@ -34,6 +36,193 @@ class BaseGuardrail:
     async def check_async(self, text: str) -> Decision:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, self.check, text)
+
+
+# ============================================================
+# Model Integration System - Type-safe adapters for ML classifiers
+# ============================================================
+
+@dataclass
+class ClassificationResult:
+    """Standard output from any semantic classifier."""
+    label: str
+    confidence: float
+    metadata: dict[str, Any] = None
+
+    def __post_init__(self):
+        if self.metadata is None:
+            self.metadata = {}
+
+
+class BaseModelAdapter(ABC):
+    """Abstract base for all ML model adapters. Implement for your model type."""
+
+    @abstractmethod
+    def predict(self, text: str) -> list[ClassificationResult]:
+        """Sync prediction - override for simple models."""
+        pass
+
+    async def predict_async(self, text: str) -> list[ClassificationResult]:
+        """Async prediction - runs sync in executor by default."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self.predict, text)
+
+    @abstractmethod
+    def get_labels(self) -> list[str]:
+        """Return all possible labels this model can predict."""
+        pass
+
+
+class HFClassifierAdapter(BaseModelAdapter):
+    """Adapter for HuggingFace transformers classifiers (JEV, DeBERTa, etc.)."""
+
+    def __init__(self, model_name: str, label_map: dict[int, str] = None, threshold: float = 0.5, **kwargs):
+        self.model_name = model_name
+        self.label_map = label_map
+        self.threshold = threshold
+        self._pipeline = None
+        self._kwargs = kwargs
+
+    def _load(self):
+        if self._pipeline is None:
+            from transformers import pipeline
+            self._pipeline = pipeline("text-classification", model=self.model_name, **self._kwargs)
+
+    def predict(self, text: str) -> list[ClassificationResult]:
+        self._load()
+        results = self._pipeline(text, top_k=None)
+        outputs = []
+        for r in results:
+            label = self.label_map.get(r["label"], r["label"]) if self.label_map else r["label"]
+            if r["score"] >= self.threshold:
+                outputs.append(ClassificationResult(label=label, confidence=r["score"]))
+        return outputs
+
+    async def predict_async(self, text: str) -> list[ClassificationResult]:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self.predict, text)
+
+    def get_labels(self) -> list[str]:
+        if self.label_map:
+            return list(self.label_map.values())
+        return []
+
+
+class PresidioPIIAdapter(BaseModelAdapter):
+    """Adapter for Microsoft Presidio PII detection."""
+
+    def __init__(self, entities: list[str] = None, language: str = "en", threshold: float = 0.5):
+        self.entities = entities
+        self.language = language
+        self.threshold = threshold
+        self._analyzer = None
+
+    def _load(self):
+        if self._analyzer is None:
+            from presidio_analyzer import AnalyzerEngine
+            self._analyzer = AnalyzerEngine()
+
+    def predict(self, text: str) -> list[ClassificationResult]:
+        self._load()
+        results = self._analyzer.analyze(text=text, entities=self.entities, language=self.language)
+        outputs = []
+        for r in results:
+            if r.score >= self.threshold:
+                outputs.append(ClassificationResult(
+                    label=r.entity_type,
+                    confidence=r.score,
+                    metadata={"start": r.start, "end": r.end, "text": text[r.start:r.end]}
+                ))
+        return outputs
+
+    def get_labels(self) -> list[str]:
+        return self.entities or ["PERSON", "EMAIL", "PHONE_NUMBER", "CREDIT_CARD", "API_KEY"]
+
+
+class ONNXClassifierAdapter(BaseModelAdapter):
+    """Adapter for ONNX runtime models (fast, no PyTorch dependency)."""
+
+    def __init__(self, model_path: str, label_map: dict[int, str], threshold: float = 0.5):
+        self.model_path = model_path
+        self.label_map = label_map
+        self.threshold = threshold
+        self._session = None
+
+    def _load(self):
+        if self._session is None:
+            import onnxruntime as ort
+            self._session = ort.InferenceSession(self.model_path)
+
+    def predict(self, text: str) -> list[ClassificationResult]:
+        self._load()
+        # Tokenize - implement based on your model's tokenizer
+        import numpy as np
+        inputs = self._tokenize(text)
+        outputs = self._session.run(None, inputs)
+        logits = outputs[0]
+        probs = self._softmax(logits)
+        results = []
+        for idx, prob in enumerate(probs[0]):
+            if prob >= self.threshold:
+                label = self.label_map.get(idx, str(idx))
+                results.append(ClassificationResult(label=label, confidence=float(prob)))
+        return results
+
+    def _tokenize(self, text: str):
+        # Implement based on your model (e.g., using transformers tokenizer)
+        raise NotImplementedError("Implement _tokenize for your ONNX model")
+
+    def _softmax(self, x):
+        import numpy as np
+        e_x = np.exp(x - np.max(x))
+        return e_x / e_x.sum(axis=-1, keepdims=True)
+
+    def get_labels(self) -> list[str]:
+        return list(self.label_map.values())
+
+
+class ModelGuardrail(BaseGuardrail):
+    """Generic guardrail that uses any BaseModelAdapter."""
+
+    def __init__(
+        self,
+        adapter: BaseModelAdapter,
+        target_labels: list[str] = None,
+        action: str = "block",
+    ):
+        super().__init__(action)
+        self.adapter = adapter
+        self.target_labels = set(target_labels or [])
+
+    def check(self, text: str) -> Decision:
+        results = self.adapter.predict(text)
+        for r in results:
+            if not self.target_labels or r.label in self.target_labels:
+                if r.confidence >= self.adapter.threshold:
+                    return self._make_decision(
+                        False,
+                        f"{r.label} detected (confidence: {r.confidence:.2f})",
+                    )
+        return self._make_decision(True, "No target labels detected")
+
+    async def check_async(self, text: str) -> Decision:
+        results = await self.adapter.predict_async(text)
+        for r in results:
+            if not self.target_labels or r.label in self.target_labels:
+                if r.confidence >= self.adapter.threshold:
+                    return self._make_decision(
+                        False,
+                        f"{r.label} detected (confidence: {r.confidence:.2f})",
+                    )
+        return self._make_decision(True, "No target labels detected")
+
+
+# Register model-based guardrails
+def register_model_guardrail(name: str, adapter: BaseModelAdapter, target_labels: list[str] = None, action: str = "block"):
+    """Factory to create and register a model-based guardrail."""
+    guardrail = ModelGuardrail(adapter, target_labels, action)
+    GUARDRAIL_REGISTRY[name] = lambda **kwargs: guardrail
+    return guardrail
 
 
 class MaxLengthGuardrail(BaseGuardrail):
