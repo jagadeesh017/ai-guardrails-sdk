@@ -103,6 +103,65 @@ TOXIC_PATTERNS = [
 ]
 
 
+INJECTION_PATTERNS = [
+    r"ignore (previous|above|all) instructions",
+    r"disregard (previous|above|all) (instructions|prompts)",
+    r"you are now (a|an) ",
+    r"pretend (to be|you are)",
+    r"roleplay as",
+    r"system prompt",
+    r"<\|.*\|>",
+    r"\[INST\].*\[/INST\]",
+    r"### (instruction|system|user|assistant)",
+    r"jailbreak",
+    r"bypass (safety|filter|guard)",
+    r"override (safety|instructions)",
+]
+
+
+class PromptInjectionGuardrail(BaseGuardrail):
+    def __init__(self, action: str = "block"):
+        super().__init__(action)
+
+    def check(self, text: str) -> Decision:
+        text_lower = text.lower()
+        for p in INJECTION_PATTERNS:
+            if re.search(p, text_lower):
+                return self._make_decision(False, f"Prompt injection detected: {p}")
+        return self._make_decision(True, "No prompt injection detected")
+
+
+TOPIC_KEYWORDS = {
+    "violence": ["bomb", "weapon", "gun", "knife", "kill", "murder", "attack", "fight", "violence", "hurt", "harm"],
+    "illegal": ["illegal", "crime", "steal", "drug", "hack", "fraud", "launder", "blackmail"],
+    "self_harm": ["suicide", "kill myself", "hurt myself", "self harm", "cut myself", "end my life"],
+    "hate_speech": ["hate", "nazi", "racist", "slur", "supremacy", "genocide"],
+    "sexual": ["porn", "sex", "nude", "explicit", "erotic"],
+}
+
+
+class TopicGuardrail(BaseGuardrail):
+    def __init__(
+        self,
+        denied_topics: list[str] = None,
+        action: str = "block",
+    ):
+        super().__init__(action)
+        self.denied_topics = [t.lower() for t in (denied_topics or [])]
+
+    def check(self, text: str) -> Decision:
+        text_lower = text.lower()
+
+        if self.denied_topics:
+            for topic in self.denied_topics:
+                keywords = TOPIC_KEYWORDS.get(topic, [topic])
+                for kw in keywords:
+                    if kw in text_lower:
+                        return self._make_decision(False, f"Denied topic detected: {topic} (matched: {kw})")
+
+        return self._make_decision(True, "Topic check passed")
+
+
 class ToxicityGuardrail(BaseGuardrail):
     def __init__(self, threshold: float = 0.5, action: str = "block"):
         super().__init__(action)
@@ -186,6 +245,8 @@ GUARDRAIL_REGISTRY = {
     "blocked_words": BlockedWordsGuardrail,
     "pii": PIIGuardrail,
     "toxicity": ToxicityGuardrail,
+    "prompt_injection": PromptInjectionGuardrail,
+    "topic": TopicGuardrail,
 }
 
 
