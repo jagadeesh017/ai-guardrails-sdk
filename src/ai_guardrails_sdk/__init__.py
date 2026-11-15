@@ -291,6 +291,134 @@ class LoopCounterGuardrail(BaseGuardrail):
         self.tool_call_count = 0
 
 
+class JSONSchemaGuardrail(BaseGuardrail):
+    def __init__(self, schema: dict = None, action: str = "retry", max_retries: int = 3):
+        super().__init__(action)
+        self.schema = schema
+        self.max_retries = max_retries
+        self.retry_count = 0
+
+    def check(self, text: str) -> Decision:
+        import json
+        try:
+            data = json.loads(text)
+            if self.schema:
+                errors = self._validate(data, self.schema)
+                if errors:
+                    self.retry_count += 1
+                    if self.action == "retry" and self.retry_count <= self.max_retries:
+                        return self._make_decision(False, f"Schema validation failed: {errors}", modified_text=None)
+                    return self._make_decision(False, f"Schema validation failed after {self.retry_count} retries: {errors}")
+        except json.JSONDecodeError as e:
+            self.retry_count += 1
+            if self.action == "retry" and self.retry_count <= self.max_retries:
+                return self._make_decision(False, f"Invalid JSON: {e}", modified_text=None)
+            return self._make_decision(False, f"Invalid JSON after {self.retry_count} retries: {e}")
+        return self._make_decision(True, "JSON schema validation passed")
+
+    def _validate(self, data: dict, schema: dict, path: str = "") -> list[str]:
+        errors = []
+        required = schema.get("required", [])
+        for field in required:
+            if field not in data:
+                errors.append(f"{path}{field}: required field missing")
+        properties = schema.get("properties", {})
+        for key, value in data.items():
+            if key in properties:
+                prop_schema = properties[key]
+                expected_type = prop_schema.get("type")
+                if expected_type:
+                    type_map = {"string": str, "number": (int, float), "integer": int, "boolean": bool, "array": list, "object": dict}
+                    expected = type_map.get(expected_type)
+                    if expected and not isinstance(value, expected):
+                        errors.append(f"{path}{key}: expected {expected_type}, got {type(value).__name__}")
+                if expected_type == "object" and isinstance(value, dict):
+                    errors.extend(self._validate(value, prop_schema, f"{path}{key}."))
+        return errors
+
+    def reset(self):
+        self.retry_count = 0
+
+
+class HallucinationGuardrail(BaseGuardrail):
+    def __init__(self, context: str = None, threshold: float = 0.7, action: str = "warn"):
+        super().__init__(action)
+        self.context = context
+        self.threshold = threshold
+
+    def check(self, text: str) -> Decision:
+        if not self.context:
+            return self._make_decision(True, "No context provided for grounding check")
+        text_lower = text.lower()
+        context_lower = self.context.lower()
+        text_sentences = [s.strip() for s in text_lower.split('.') if s.strip()]
+        ungrounded = []
+        for sent in text_sentences:
+            sent_words = set(sent.split())
+            context_words = set(context_lower.split())
+            overlap = sent_words & context_words
+            score = len(overlap) / len(sent_words) if sent_words else 0
+            if score <= self.threshold:
+                ungrounded.append(sent)
+        if ungrounded:
+            return self._make_decision(False, f"Ungrounded sentences: {'; '.join(ungrounded)}")
+        return self._make_decision(True, "All sentences grounded")
+
+
+class PIILeakGuardrail(BaseGuardrail):
+    def __init__(self, entities: list[str] = None, action: str = "redact"):
+        super().__init__(action)
+        self.entities = entities or ["email", "phone", "ssn", "api_key"]
+
+    def check(self, text: str) -> Decision:
+        import re
+        found = []
+        for entity in self.entities:
+            pattern = PII_PATTERNS.get(entity)
+            if pattern and re.search(pattern, text):
+                found.append(entity)
+        if found:
+            reason = f"PII leak detected: {', '.join(found)}"
+            modified = self._redact(text) if self.action == "redact" else None
+            return self._make_decision(False, reason, modified)
+        return self._make_decision(True, "No PII leak detected")
+
+    def _redact(self, text: str) -> str:
+        import re
+        result = text
+        for entity in self.entities:
+            pattern = PII_PATTERNS.get(entity)
+            if pattern:
+                result = re.sub(pattern, f"[REDACTED_{entity.upper()}]", result)
+        return result
+
+
+class BrandFilterGuardrail(BaseGuardrail):
+    def __init__(self, blocked_terms: list[str] = None, replacement: str = "[REDACTED]", action: str = "redact"):
+        super().__init__(action)
+        self.blocked_terms = [t.lower() for t in (blocked_terms or [])]
+        self.replacement = replacement
+
+    def check(self, text: str) -> Decision:
+        text_lower = text.lower()
+        found = []
+        for term in self.blocked_terms:
+            if term in text_lower:
+                found.append(term)
+        if found:
+            reason = f"Brand/competitor term detected: {', '.join(found)}"
+            modified = self._filter(text) if self.action == "redact" else None
+            return self._make_decision(False, reason, modified)
+        return self._make_decision(True, "No brand terms detected")
+
+    def _filter(self, text: str) -> str:
+        import re
+        result = text
+        for term in self.blocked_terms:
+            result = re.sub(re.escape(term), self.replacement, result, flags=re.IGNORECASE)
+        return result
+
+
 async def check_async(text: str, guardrails: list[BaseGuardrail]) -> Decision:
     current_text = text
     for g in guardrails:
@@ -366,6 +494,10 @@ GUARDRAIL_REGISTRY = {
     "tool_schema": ToolSchemaGuardrail,
     "hitl": HITLGuardrail,
     "loop_counter": LoopCounterGuardrail,
+    "json_schema": JSONSchemaGuardrail,
+    "hallucination": HallucinationGuardrail,
+    "pii_leak": PIILeakGuardrail,
+    "brand_filter": BrandFilterGuardrail,
 }
 
 

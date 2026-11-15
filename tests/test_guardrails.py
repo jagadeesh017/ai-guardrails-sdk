@@ -2,11 +2,15 @@ import pytest
 
 from ai_guardrails_sdk import (
     BlockedWordsGuardrail,
+    BrandFilterGuardrail,
     Decision,
+    HallucinationGuardrail,
     HITLGuardrail,
+    JSONSchemaGuardrail,
     LoopCounterGuardrail,
     MaxLengthGuardrail,
     PIIGuardrail,
+    PIILeakGuardrail,
     PromptInjectionGuardrail,
     ToolAllowlistGuardrail,
     ToolSchemaGuardrail,
@@ -228,3 +232,47 @@ def test_loop_counter_reset():
     assert loop.check("step 2").allowed is False
     loop.reset()
     assert loop.check("step 1").allowed is True
+
+
+import json
+
+
+def test_json_schema_valid():
+    guard = JSONSchemaGuardrail({"required": ["name"], "properties": {"name": {"type": "string"}}})
+    assert guard.check(json.dumps({"name": "John"})).allowed is True
+
+
+def test_json_schema_missing_required():
+    guard = JSONSchemaGuardrail({"required": ["name"]})
+    assert guard.check(json.dumps({})).allowed is False
+
+
+def test_json_schema_type_mismatch():
+    guard = JSONSchemaGuardrail({"properties": {"age": {"type": "integer"}}})
+    assert guard.check(json.dumps({"age": "thirty"})).allowed is False
+
+
+def test_hallucination_grounded():
+    guard = HallucinationGuardrail(context="The capital of France is Paris.", threshold=0.5)
+    assert guard.check("Paris is the capital of France.").allowed is True
+
+
+def test_hallucination_ungrounded():
+    guard = HallucinationGuardrail(context="The capital of France is Paris.", threshold=0.5, action="block")
+    assert guard.check("The moon is made of cheese.").allowed is False
+
+
+def test_pii_leak_redact():
+    guard = PIILeakGuardrail(entities=["email"], action="redact")
+    decision = guard.check("Contact me at john@example.com")
+    assert decision.allowed is False
+    assert decision.action == "redact"
+    assert "[REDACTED_EMAIL]" in decision.modified_text
+
+
+def test_brand_filter_redact():
+    guard = BrandFilterGuardrail(blocked_terms=["competitor"], replacement="[BRAND]", action="redact")
+    decision = guard.check("Better than competitor")
+    assert decision.allowed is False
+    assert decision.action == "redact"
+    assert "[BRAND]" in decision.modified_text

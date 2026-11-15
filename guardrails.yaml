@@ -23,3 +23,21 @@ pipeline:
     - type: pii
       entities: ["email", "phone", "ssn"]
       action: block
+    - type: json_schema
+      schema:
+        required: ["response"]
+        properties:
+          response: {type: "string"}
+      action: retry
+      max_retries: 3
+    - type: hallucination
+      context: "The capital of France is Paris. It is known for the Eiffel Tower."
+      threshold: 0.5
+      action: warn
+    - type: pii_leak
+      entities: ["email", "phone", "ssn"]
+      action: redact
+    - type: brand_filter
+      blocked_terms: ["competitor", "internal_codename"]
+      replacement: "[BRAND]"
+      action: redact
